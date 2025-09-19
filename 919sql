@@ -1,5 +1,5 @@
 -- StandardSQL (BigQuery)
--- Pay rate per day using rolling 30-day registration cohorts (JST)
+-- Daily pay rate where denominator = active new users that day (registered within last 30 days and logged in that day), numerator = those who paid that day (JST)
 WITH calendar AS (
   SELECT day
   FROM UNNEST(GENERATE_DATE_ARRAY(
@@ -14,14 +14,19 @@ users AS (
   FROM `db_data.u_status` AS s
   JOIN `analytics.valid_user` v USING (uMasterId)
 ),
-first_payment AS (
-  SELECT
+day_logins AS (
+  SELECT DISTINCT
+    l.uMasterId,
+    DATE(TIMESTAMP(l.createdAt), 'Asia/Tokyo') AS day
+  FROM `db_log.u_daily_login` AS l
+),
+day_payments AS (
+  SELECT DISTINCT
     p.uMasterId,
-    MIN(DATE(TIMESTAMP(p.createdAt), 'Asia/Tokyo')) AS first_payment_date  -- change p.createdAt to your actual payment timestamp column
+    DATE(TIMESTAMP(p.createdAt), 'Asia/Tokyo') AS day
   FROM `db_log.u_payment` AS p
   -- If you only want successful monetary payments, add a condition like:
   -- WHERE p.amount > 0
-  GROUP BY p.uMasterId
 ),
 cohorts AS (
   SELECT
@@ -30,19 +35,24 @@ cohorts AS (
   FROM calendar AS c
   JOIN users AS u
     ON u.registered_date BETWEEN DATE_SUB(c.day, INTERVAL 30 DAY) AND c.day
+),
+new_users_active AS (
+  SELECT
+    coh.day,
+    coh.uMasterId
+  FROM cohorts AS coh
+  JOIN day_logins AS dl
+    ON dl.day = coh.day AND dl.uMasterId = coh.uMasterId
 )
 SELECT
   c.day AS as_of_date,
-  COUNT(coh.uMasterId) AS registered_last_30d,
-  COUNTIF(fp.first_payment_date IS NOT NULL AND fp.first_payment_date <= c.day) AS paying_users_among_cohort,
-  SAFE_DIVIDE(
-    COUNTIF(fp.first_payment_date IS NOT NULL AND fp.first_payment_date <= c.day),
-    COUNT(coh.uMasterId)
-  ) AS paying_rate
+  COUNT(anu.uMasterId) AS active_new_users,
+  COUNTIF(dp.uMasterId IS NOT NULL) AS paying_active_new_users,
+  SAFE_DIVIDE(COUNTIF(dp.uMasterId IS NOT NULL), COUNT(anu.uMasterId)) AS paying_rate
 FROM calendar AS c
-LEFT JOIN cohorts AS coh
-  ON coh.day = c.day
-LEFT JOIN first_payment AS fp
-  ON fp.uMasterId = coh.uMasterId
+LEFT JOIN new_users_active AS anu
+  ON anu.day = c.day
+LEFT JOIN day_payments AS dp
+  ON dp.day = c.day AND dp.uMasterId = anu.uMasterId
 GROUP BY c.day
 ORDER BY c.day;
