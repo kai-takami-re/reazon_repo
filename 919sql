@@ -1,0 +1,27 @@
+-- StandardSQL (BigQuery)
+-- Replace `project.dataset` with your actual project & dataset names.
+WITH new_users AS (
+  SELECT
+    s.uMasterId,
+    s.createdAt AS registered_at
+  FROM `db_data.u_status` AS s
+-- Optional: exclude test/admin/banned, if you have such a table
+  JOIN `analytics.valid_user` v USING (uMasterId)
+  -- If createdAt is TIMESTAMP, this casts to DATE in JST and filters last 30 days (inclusive)
+  WHERE DATE(TIMESTAMP(s.createdAt), 'Asia/Tokyo') >= DATE_SUB(CURRENT_DATE('Asia/Tokyo'), INTERVAL 30 DAY)
+
+),
+paid_anytime AS (
+  SELECT DISTINCT p.uMasterId
+  FROM `db_log.u_payment` AS p
+  -- If you only want successful monetary payments, add a condition like:
+  -- WHERE p.amount > 0
+)
+
+SELECT
+  COUNT(*) AS new_users_30d,
+  COUNTIF(p.uMasterId IS NOT NULL) AS paying_users_among_new,
+  SAFE_DIVIDE(COUNTIF(p.uMasterId IS NOT NULL), COUNT(*)) AS paying_rate
+FROM new_users n
+LEFT JOIN paid_anytime p
+  ON p.uMasterId = n.uMasterId;
