@@ -1,27 +1,48 @@
 -- StandardSQL (BigQuery)
--- Replace `project.dataset` with your actual project & dataset names.
-WITH new_users AS (
+-- Pay rate per day using rolling 30-day registration cohorts (JST)
+WITH calendar AS (
+  SELECT day
+  FROM UNNEST(GENERATE_DATE_ARRAY(
+    DATE_SUB(CURRENT_DATE('Asia/Tokyo'), INTERVAL 90 DAY),
+    CURRENT_DATE('Asia/Tokyo')
+  )) AS day
+),
+users AS (
   SELECT
     s.uMasterId,
-    s.createdAt AS registered_at
+    DATE(TIMESTAMP(s.createdAt), 'Asia/Tokyo') AS registered_date
   FROM `db_data.u_status` AS s
--- Optional: exclude test/admin/banned, if you have such a table
   JOIN `analytics.valid_user` v USING (uMasterId)
-  -- If createdAt is TIMESTAMP, this casts to DATE in JST and filters last 30 days (inclusive)
-  WHERE DATE(TIMESTAMP(s.createdAt), 'Asia/Tokyo') >= DATE_SUB(CURRENT_DATE('Asia/Tokyo'), INTERVAL 30 DAY)
-
 ),
-paid_anytime AS (
-  SELECT DISTINCT p.uMasterId
+first_payment AS (
+  SELECT
+    p.uMasterId,
+    MIN(DATE(TIMESTAMP(p.createdAt), 'Asia/Tokyo')) AS first_payment_date  -- change p.createdAt to your actual payment timestamp column
   FROM `db_log.u_payment` AS p
   -- If you only want successful monetary payments, add a condition like:
   -- WHERE p.amount > 0
+  GROUP BY p.uMasterId
+),
+cohorts AS (
+  SELECT
+    c.day,
+    u.uMasterId
+  FROM calendar AS c
+  JOIN users AS u
+    ON u.registered_date BETWEEN DATE_SUB(c.day, INTERVAL 30 DAY) AND c.day
 )
-
 SELECT
-  COUNT(*) AS new_users_30d,
-  COUNTIF(p.uMasterId IS NOT NULL) AS paying_users_among_new,
-  SAFE_DIVIDE(COUNTIF(p.uMasterId IS NOT NULL), COUNT(*)) AS paying_rate
-FROM new_users n
-LEFT JOIN paid_anytime p
-  ON p.uMasterId = n.uMasterId;
+  c.day AS as_of_date,
+  COUNT(coh.uMasterId) AS registered_last_30d,
+  COUNTIF(fp.first_payment_date IS NOT NULL AND fp.first_payment_date <= c.day) AS paying_users_among_cohort,
+  SAFE_DIVIDE(
+    COUNTIF(fp.first_payment_date IS NOT NULL AND fp.first_payment_date <= c.day),
+    COUNT(coh.uMasterId)
+  ) AS paying_rate
+FROM calendar AS c
+LEFT JOIN cohorts AS coh
+  ON coh.day = c.day
+LEFT JOIN first_payment AS fp
+  ON fp.uMasterId = coh.uMasterId
+GROUP BY c.day
+ORDER BY c.day;
